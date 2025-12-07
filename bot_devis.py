@@ -1,249 +1,198 @@
-import re
-import time
+import os
 import logging
-import requests
+import re
+from telegram import Update
+from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-# Ton token de bot Telegram
-TOKEN = "8287141115:AAGDr8xhnc7VkRNxrHp_g0FmNPc0bN7b--A"
-BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
+
+# ----------------- CALCULS ----------------- #
+
+def normalize_expr(text: str) -> str:
+    """
+    Nettoie le texte pour en faire une expression mathématique safe.
+    - remplace virgule par point
+    - remplace x / X / × par *
+    - remplace 'retirer' par -
+    - garde seulement chiffres, + - * . et espaces
+    """
+    t = text.lower()
+    t = t.replace("retirer", "-")
+    t = t.replace(",", ".")
+    t = t.replace("×", "*")
+    t = t.replace("x", "*")
+
+    allowed = set("0123456789.+-*() ")
+    expr = "".join(ch for ch in t if ch in allowed)
+    return expr.strip()
 
 
-# ---------- FORMATAGE NOMBRES ----------
+def has_operation(line: str) -> bool:
+    """On ne calcule que s'il y a au moins un opérateur dans la ligne."""
+    l = line.lower()
+    if not any(op in l for op in ["x", "×", "*", "+", "retirer"]):
+        return False
+    # éviter les lignes du style "1 m² fixateur"
+    if "m²" in l or "m2" in l:
+        # mais s'il y a vraiment un X, on garde (genre "5 x 4 m²")
+        if not any(op in l for op in ["x", "×", "*"]):
+            return False
+    return True
 
-def format_nombre(val: float) -> str:
-    v = round(val, 2)
-    s = f"{v:.2f}"
-    s = s.replace(".", ",")
-    if s.endswith("0"):
-        s = s[:-1]
+
+def compute_line(line: str):
+    """
+    Retourne (valeur, unité) ou (None, None) si on ne calcule pas cette ligne.
+    unité = 'm²' si multiplication présente, sinon 'm'.
+    """
+    if not any(ch.isdigit() for ch in line):
+        return None, None
+    if not has_operation(line):
+        return None, None
+
+    expr = normalize_expr(line)
+    if not expr or not any(ch.isdigit() for ch in expr):
+        return None, None
+
+    try:
+        # sécurité : pas de builtins, juste eval des nombres
+        value = eval(expr, {"__builtins__": {}}, {})
+    except Exception as e:
+        logger.warning(f"Erreur de calcul pour '{line}' -> '{expr}': {e}")
+        return None, None
+
+    # unité : s'il y a une multiplication, on considère m², sinon m linéaire
+    unit = "m²" if "*" in expr else "m"
+    return value, unit
+
+
+def format_number(v: float) -> str:
+    """Format genre 30,8 / 11,06 / 17,6 (virgule et suppression des zéros inutiles)."""
+    s = f"{v:.2f}".replace(".", ",")
+    if "," in s:
+        head, tail = s.split(",")
+        tail = tail.rstrip("0")
+        if tail == "":
+            return head
+        return f"{head},{tail}"
     return s
 
 
-# ---------- CALCULS ----------
-
-def extrait_parties_retirer(texte: str):
-    parts = re.split(r"(?i)\bretirer\b", texte, maxsplit=1)
-    avant = parts[0]
-    apres = parts[1] if len(parts) > 1 else ""
-    return avant, apres
-
-
-def str_vers_float(num_str: str) -> float:
-    return float(num_str.replace(",", ".").strip())
-
-
-def calc_surface_segment(segment: str) -> float | None:
-    if not re.search(r"[xX×]", segment):
-        return None
-
-    last_x_pos = max(segment.rfind("x"), segment.rfind("X"), segment.rfind("×"))
-    if last_x_pos == -1:
-        return None
-
-    after = segment[last_x_pos + 1:]
-    match_height = re.search(r"(\d+(?:,\d+)?)", after)
-    if not match_height:
-        return None
-    hauteur = str_vers_float(match_height.group(1))
-
-    before = segment[:last_x_pos]
-    nums_before = re.findall(r"(\d+(?:,\d+)?)", before)
-    if not nums_before:
-        return None
-
-    largeur_totale = sum(str_vers_float(n) for n in nums_before)
-    return largeur_totale * hauteur
-
-
-def calc_surface_ligne(ligne: str) -> float | None:
-    avant, apres = extrait_parties_retirer(ligne)
-    s1 = calc_surface_segment(avant)
-    if s1 is None:
-        return None
-
-    s2 = 0.0
-    if re.search(r"[xX×]", apres):
-        seg2 = calc_surface_segment(apres)
-        if seg2 is not None:
-            s2 = seg2
-
-    return s1 - s2
-
-
-def calc_longueur_ligne(ligne: str) -> float | None:
-    avant, apres = extrait_parties_retirer(ligne)
-
-    nums_avant = re.findall(r"(\d+(?:,\d+)?)", avant)
-    if not nums_avant:
-        return None
-    long1 = sum(str_vers_float(n) for n in nums_avant)
-
-    long2 = 0.0
-    nums_apres = re.findall(r"(\d+(?:,\d+)?)", apres)
-    if nums_apres:
-        long2 = sum(str_vers_float(n) for n in nums_apres)
-
-    return long1 - long2
-
-
-# ---------- LOGIQUE DE FORMATAGE DU DEVIS ----------
+# ----------------- PARSE DU MESSAGE ----------------- #
 
 PIECES = {
-    "salon",
-    "cuisine",
-    "couloir",
-    "salle de bain",
-    "salle de bains",
-    "cage d'escalier",
-    "cage d’éscalier",
-    "cage d’escalier",
-    "entree",
-    "entrée",
-    "garage",
-    "chambre",
-    "buanderie",
-    "placard",
-    "toilettes",
-    "wc",
-    "salle à manger",
-    "salle a manger",
+    "salon", "cuisine", "couloir", "salle de bain", "salle-de-bain",
+    "cage d'escalier", "cage d’escalier", "entrée", "entree",
+    "garage", "chambre", "buanderie", "placard", "toilettes",
+    "wc", "salle à manger", "salle a manger"
 }
 
-SUPPORTS = {
-    "plafond",
-    "sol",
-    "mur",
-    "façade",
-    "facade",
-    "porte",
-    "fenêtre",
-    "fenetre",
-    "escalier",
-}
+SUPPORTS = {"plafond", "sol", "mur", "façade", "facade", "porte", "fenêtre", "fenetre", "escalier"}
 
 
-def ajoute_repere_piece_ou_support(ligne: str) -> str:
-    s = ligne.strip()
-    s_lc = s.lower()
+def format_devis(text: str) -> str:
+    lines = [l.rstrip() for l in text.splitlines()]
+    if not lines:
+        return ""
 
-    if s_lc in PIECES:
-        return f"▶️{s}"
+    # on ignore la première ligne "devis"
+    if lines[0].strip().lower().startswith("devis"):
+        lines = lines[1:]
 
-    for sup in SUPPORTS:
-        if s_lc == sup or s_lc.startswith(sup + " "):
-            return "▫️" + s
+    output_lines = []
+    current_support_total = 0.0
+    current_support_name = None
+    current_support_unit = None
 
-    return ligne
+    def flush_support_total():
+        nonlocal current_support_total, current_support_name, current_support_unit
+        if current_support_name and current_support_total > 0 and current_support_unit:
+            out = f"TOTAL {current_support_name} : {format_number(current_support_total)} {current_support_unit}"
+            output_lines.append(out)
+        current_support_total = 0.0
+        current_support_name = None
+        current_support_unit = None
 
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            output_lines.append("")
+            continue
 
-def doit_ignorer_calc(ligne: str) -> bool:
-    lcl = ligne.lower()
-    if "m²" in lcl or "m2" in lcl:
-        return True
-    if re.search(r"\d+\s*[Hh]\b", ligne):
-        return True
-    return False
+        lower = line.lower()
 
+        # ligne = nom de pièce
+        if lower in PIECES:
+            flush_support_total()
+            output_lines.append(f"▶️{line}")
+            continue
 
-def ajoute_calcul_sur_ligne(ligne: str) -> str:
-    base = ajoute_repere_piece_ou_support(ligne)
-    if doit_ignorer_calc(ligne):
-        return base
+        # ligne = support (plafond / mur / sol...)
+        if lower in SUPPORTS:
+            flush_support_total()
+            current_support_name = line
+            current_support_unit = None
+            output_lines.append(f"▫️{line}")
+            continue
 
-    if not re.search(r"\d", ligne):
-        return base
-
-    if re.search(r"[xX×]", ligne):
-        surface = calc_surface_ligne(ligne)
-        if surface is None:
-            return base
-        valeur = format_nombre(surface)
-        return f"{base} (🔸 {valeur} m²)"
-
-    longueur = calc_longueur_ligne(ligne)
-    if longueur is None:
-        return base
-    valeur = format_nombre(longueur)
-    return f"{base} (🔸 {valeur} m)"
-
-
-def formate_devis_texte(texte: str) -> str:
-    lignes = texte.splitlines()
-
-    lignes_a_traiter: list[str] = []
-    if lignes:
-        first = lignes[0].strip()
-        if first.lower().startswith("devis"):
-            reste = first[5:].strip()
-            if reste:
-                lignes_a_traiter.append(reste)
-            lignes_a_traiter.extend(lignes[1:])
+        # lignes normales avec puce
+        value, unit = compute_line(line)
+        if value is not None:
+            # on mémorise l'unité pour TOTAL
+            if current_support_unit is None:
+                current_support_unit = unit
+            # si on mélange m et m² dans le même support, on sépare
+            elif current_support_unit != unit:
+                flush_support_total()
+                current_support_name = None
+                current_support_unit = unit
+            current_support_total += value
+            out_line = f"{line} (🔸 {format_number(value)} {unit})"
+            output_lines.append(out_line)
         else:
-            lignes_a_traiter = lignes
-    else:
-        return texte
+            output_lines.append(line)
 
-    resultat = []
-    for l in lignes_a_traiter:
-        if l.strip() == "":
-            resultat.append("")
-        else:
-            resultat.append(ajoute_calcul_sur_ligne(l))
-
-    return "\n".join(resultat).strip()
+    flush_support_total()
+    return "\n".join(output_lines)
 
 
-# ---------- TELEGRAM ----------
+# ----------------- TELEGRAM ----------------- #
 
-def send_message(chat_id: int, text: str):
-    try:
-        requests.post(
-            BASE_URL + "sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=10,
-        )
-    except Exception as e:
-        logging.error(f"Erreur en envoyant le message: {e}")
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # sur Render
+if not BOT_TOKEN:
+    # si tu veux tester en local sans Render, colle ton token ici :
+    BOT_TOKEN = "TON_TOKEN_ICI"
 
 
-def handle_message(message: dict):
-    text = message.get("text")
-    if not text:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not message.text:
         return
 
-    if not text.lower().startswith("devis"):
+    text = message.text
+
+    # on déclenche seulement si le message commence par "devis"
+    if not text.strip().lower().startswith("devis"):
         return
 
-    devis_formate = formate_devis_texte(text)
-    chat_id = message["chat"]["id"]
-    send_message(chat_id, devis_formate)
+    formatted = format_devis(text)
+    if not formatted:
+        return
+
+    # petite en-tête propre
+    await message.reply_text(f"📄 Devis – Calcul\n\n{formatted}")
 
 
 def main():
-    last_update_id = None
-
-    logging.info("Bot devis CALCUL démarré (mode simple sans async).")
-
-    while True:
-        try:
-            params = {"timeout": 30}
-            if last_update_id is not None:
-                params["offset"] = last_update_id + 1
-
-            resp = requests.get(BASE_URL + "getUpdates", params=params, timeout=40)
-            data = resp.json()
-
-            for update in data.get("result", []):
-                last_update_id = update["update_id"]
-                message = update.get("message") or update.get("edited_message")
-                if message:
-                    handle_message(message)
-
-        except Exception as e:
-            logging.error(f"Erreur dans la boucle principale: {e}")
-            time.sleep(5)
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    logger.info("Bot devis CALCUL démarré.")
+    app.run_polling()
 
 
 if __name__ == "__main__":
