@@ -1,3 +1,4 @@
+print("BOT ADRESSE LANCE")
 import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
