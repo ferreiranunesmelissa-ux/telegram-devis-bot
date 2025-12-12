@@ -1,4 +1,4 @@
-print("BOT ADRESSE LANCE")
+print("BOT ADRESSE DEMARRE")
 import re
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -23,3 +23,4 @@ async def detect_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, detect_address))
 app.run_polling()
+print("BOT ADRESSE EN COURS")
