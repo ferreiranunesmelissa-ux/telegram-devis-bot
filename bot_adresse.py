@@ -1,26 +1,57 @@
-print("BOT ADRESSE DEMARRE")
+import os
 import re
+from urllib.parse import quote_plus
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = "8465880472:AAE7oQi4QwfgddUPj8ux1anMVYVQrdk8q54"
 
-async def detect_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+def build_links(address: str) -> tuple[str, str]:
+    q = quote_plus(address)
+    google = f"https://www.google.com/maps/search/?api=1&query={q}"
+    waze = f"https://waze.com/ul?q={q}&navigate=yes"
+    return google, waze
 
-    # Détection simple : numéro + rue + ville
-    if re.search(r"\d+ .*", text):
-        adresse = text.replace("\n", " ")
-        google = f"https://www.google.com/maps/search/?api=1&query={adresse}"
-        waze = f"https://waze.com/ul?q={adresse}"
 
-        await update.message.reply_text(
-            f"📍 Adresse détectée\n\n"
-            f"Google Maps 👉 {google}\n"
-            f"Waze 👉 {waze}"
-        )
+def clean_text(text: str) -> str:
+    text = (text or "").strip()
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, detect_address))
-app.run_polling()
-print("BOT ADRESSE EN COURS")
+    text = re.sub(r"^@\w+\s+", "", text).strip()
+
+
+    return text
+
+
+async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    text = clean_text(msg.text)
+
+    if text.startswith("/"):
+        return
+
+    if len(text) < 5:
+        return
+    
+    me = context.bot.username or ""
+    mentioned = f"@{me}".lower() in msg.text.lower() if me else False
+
+    
+    google, waze = build_links(text)
+    await msg.reply_text(f"Google: {google}\nWaze: {waze}")
+
+
+def main() -> None:
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("BOT_TOKEN manquant. Ajoute-le dans Render > Environment.")
+
+    app = Application.builder().token(token).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
