@@ -86,7 +86,7 @@ PIECES = {
     "salon", "cuisine", "couloir", "salle de bain", "salle-de-bain",
     "cage d'escalier", "cage d’escalier", "entrée", "entree",
     "garage", "chambre", "buanderie", "placard", "toilettes",
-    "wc", "salle à manger", "salle a manger"
+    "wc", "salle à manger", "salle a manger", "cellier"
 }
 
 SUPPORTS = {
@@ -127,7 +127,7 @@ def format_devis(text: str) -> str:
         # ligne normale avec calcul
         value, unit = compute_line(line)
         if value is not None:
-            out_line = f"{line} = {format_number(value)} {unit}"
+            out_line = f"{line} (🔸 {format_number(value)} {unit})"
             output_lines.append(out_line)
         else:
             output_lines.append(line)
