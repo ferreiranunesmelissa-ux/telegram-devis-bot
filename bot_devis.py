@@ -1,6 +1,5 @@
 import os
 import logging
-import re
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
@@ -14,6 +13,13 @@ logger = logging.getLogger(__name__)
 # ----------------- CALCULS ----------------- #
 
 def normalize_expr(text: str) -> str:
+    """
+    Nettoie le texte pour en faire une expression mathématique safe.
+    - remplace virgule par point
+    - remplace x / X / × par *
+    - remplace 'retirer' par -
+    - garde seulement chiffres, + - * . et espaces
+    """
     t = text.lower()
     t = t.replace("retirer", "-")
     t = t.replace(",", ".")
@@ -26,10 +32,12 @@ def normalize_expr(text: str) -> str:
 
 
 def has_operation(line: str) -> bool:
+    """On ne calcule que s'il y a au moins un opérateur dans la ligne."""
     l = line.lower()
     if not any(op in l for op in ["x", "×", "*", "+", "retirer"]):
         return False
 
+    # éviter les lignes du style "1 m² fixateur"
     if "m²" in l or "m2" in l:
         if not any(op in l for op in ["x", "×", "*"]):
             return False
@@ -37,6 +45,10 @@ def has_operation(line: str) -> bool:
 
 
 def compute_line(line: str):
+    """
+    Retourne (valeur, unité) ou (None, None) si on ne calcule pas cette ligne.
+    unité = 'm²' si multiplication présente, sinon 'm'.
+    """
     if not any(ch.isdigit() for ch in line):
         return None, None
     if not has_operation(line):
@@ -57,6 +69,7 @@ def compute_line(line: str):
 
 
 def format_number(v: float) -> str:
+    """Format genre 30,8 / 11,06 / 17,6"""
     s = f"{v:.2f}".replace(".", ",")
     if "," in s:
         head, tail = s.split(",")
@@ -76,7 +89,10 @@ PIECES = {
     "wc", "salle à manger", "salle a manger"
 }
 
-SUPPORTS = {"plafond", "sol", "mur", "façade", "facade", "porte", "fenêtre", "fenetre", "escalier"}
+SUPPORTS = {
+    "plafond", "sol", "mur", "façade", "facade",
+    "porte", "fenêtre", "fenetre", "escalier"
+}
 
 
 def format_devis(text: str) -> str:
@@ -84,6 +100,7 @@ def format_devis(text: str) -> str:
     if not lines:
         return ""
 
+    # on ignore la première ligne "devis"
     if lines[0].strip().lower().startswith("devis"):
         lines = lines[1:]
 
@@ -97,20 +114,20 @@ def format_devis(text: str) -> str:
 
         lower = line.lower()
 
-        # pièce
+        # ligne = nom de pièce
         if lower in PIECES:
             output_lines.append(f"▶️{line}")
             continue
 
-        # support
+        # ligne = support
         if lower in SUPPORTS:
             output_lines.append(f"▫️{line}")
             continue
 
-        # calcul ligne
+        # ligne normale avec calcul
         value, unit = compute_line(line)
         if value is not None:
-            out_line = f"{line} (🔸 {format_number(value)} {unit})"
+            out_line = f"{line} = {format_number(value)} {unit}"
             output_lines.append(out_line)
         else:
             output_lines.append(line)
@@ -132,6 +149,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     text = message.text
 
+    # déclenchement seulement si le message commence par "devis"
     if not text.strip().lower().startswith("devis"):
         return
 
